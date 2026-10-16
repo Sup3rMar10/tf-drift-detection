@@ -1,0 +1,65 @@
+name: drift
+
+on:
+  schedule:
+    - cron: "17 5 * * *"
+  workflow_dispatch:
+    inputs:
+      simulate_drift:
+        description: "Edit the managed file first, to prove detection and the issue step"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  drift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_wrapper: false
+      - run: terraform init -input=false
+
+      # Demo only. With a remote backend the state already exists and this step goes away.
+      - name: Establish a baseline
+        run: terraform apply -auto-approve -input=false
+
+      - name: Simulate drift (demo only)
+        if: ${{ inputs.simulate_drift }}
+        run: echo '{"feature_flags":{"new_checkout":true}}' > out/app.json
+
+      - name: Detect drift
+        id: plan
+        run: |
+          set +e
+          terraform plan -input=false -detailed-exitcode -no-color > plan.txt
+          code=$?
+          cat plan.txt
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          exit 0
+
+      - name: Open an issue if there is drift (exit code 2)
+        if: steps.plan.outputs.code == '2'
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const fs = require('fs');
+            const open = await github.rest.issues.listForRepo({
+              owner: context.repo.owner, repo: context.repo.repo,
+              labels: 'terraform-drift', state: 'open'
+            });
+            if (open.data.length > 0) { core.info('drift issue already open'); return; }
+            await github.rest.issues.create({
+              owner: context.repo.owner, repo: context.repo.repo,
+              title: 'Terraform drift detected',
+              labels: ['terraform-drift'],
+              body: 'Scheduled plan found changes.\n```\n' + fs.readFileSync('plan.txt', 'utf8').slice(0, 60000) + '\n```'
+            });
+
+      - name: Fail the job on a plan error (exit code 1)
+        if: steps.plan.outputs.code == '1'
+        run: exit 1
